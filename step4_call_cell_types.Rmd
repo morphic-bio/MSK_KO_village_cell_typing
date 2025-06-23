@@ -1,0 +1,841 @@
+---
+title: "Call cell types"
+author: "Zhaoheng Li, Wei Sun"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: journal
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+    number_sections: false
+  df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R library and data input
+
+```{r load_libraries, warning = FALSE, message = FALSE}
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(tibble)
+library(cowplot)  
+library(patchwork)
+library(stringr)
+library(pheatmap)
+library(reshape2)
+library(readxl)
+library(patchwork)
+
+theme_set(theme_classic())
+
+base_dir = "/fh/working/sun_w/zli/MSK_DEC24"
+data_dir = "/fh/working/sun_w/zli/MSK_DEC24/data2/processed_samples"
+output_dir = "/fh/working/sun_w/wsun/MSK_KO_village_cell_typing/output"
+
+setwd(base_dir)
+```
+
+## Read in Seurat objects
+
+```{r}
+integrated = readRDS(file.path(output_dir,"integrated-rpca_BDF-ref.RDS"))
+dim(integrated)
+```
+
+
+## Update meta data information
+
+Focus on clusters at resolution 0.5
+
+```{r}
+meta = integrated[[]]
+dim(meta)
+meta[1:2,]
+
+meta <- meta %>% select(-mt_counts, -mt_pct, 
+                        -n_genes_by_counts, 
+                        -log1p_n_genes_by_counts, 
+                        -total_counts, 
+                        -log1p_total_counts, 
+                        -pct_counts_in_top_50_genes, 
+                        -pct_counts_in_top_100_genes, 
+                        -pct_counts_in_top_200_genes, 
+                        -pct_counts_in_top_500_genes, 
+                        -log1p_total_counts_mt, 
+                        -seurat_clusters,
+                        -RNA_snn_res.1, 
+                        -RNA_snn_res.0.8, 
+                        -RNA_snn_res.0.3)
+
+dim(meta)
+meta[1:2,]
+
+meta$barcode = rownames(meta)
+
+summary(meta$pct_counts_mt)
+summary(meta$doublet_scores)
+```
+
+## Check the sizes of clusters
+```{r}
+df_cluster <- data.frame(table(integrated$RNA_snn_res.0.5))
+names(df_cluster)[1] = "cluster"
+df_cluster$cluster = as.numeric(as.character(df_cluster$cluster))
+df_cluster = df_cluster[order(df_cluster$cluster),]
+rownames(df_cluster) = NULL
+dim(df_cluster)
+df_cluster
+
+cat(df_cluster$Freq, sep=",")
+```
+
+
+## Check a few group of DEs
+
+```{r}
+find_markers <- function(seurat_obj, cluster1, cluster2) {
+  # Step 1: Wilcoxon test
+  wilcox_res <- FindMarkers(
+    seurat_obj,
+    ident.1 = cluster1,
+    ident.2 = cluster2,
+    test.use = "wilcox",
+    logfc.threshold = 0,
+    min.pct = 0
+  )
+  
+  # Step 2: Filter by |log2FC| > 1
+  filtered_genes <- wilcox_res[abs(wilcox_res$avg_log2FC) > 1, ]
+  
+  # Step 3: Select top 1000 genes by adjusted p-value
+  ng = min(1000, nrow(filtered_genes))
+  top_genes <- rownames(head(filtered_genes[order(filtered_genes$p_val_adj), ], ng))
+  
+  # Step 4: ROC test on top genes
+  roc_res <- FindMarkers(
+    seurat_obj,
+    ident.1 = cluster1,
+    ident.2 = cluster2,
+    test.use = "roc",
+    features = top_genes
+  )
+  
+  # Step 5: Filter genes with AUC > 0.8
+  roc_filtered <- roc_res[roc_res$myAUC > 0.7 | roc_res$myAUC < 0.3, ]
+  
+  # Step 6: Select top 10 with largest pct.1 - pct.2
+  top10 = min(10, nrow(roc_filtered))
+  roc_filtered$delta <- roc_filtered$pct.1 - roc_filtered$pct.2
+  top_cluster1 <- head(roc_filtered[order(-roc_filtered$delta), ], top10)
+  top_cluster2 <- head(roc_filtered[order(roc_filtered$delta), ], top10)
+  
+  # Return list of results
+  return(list(
+    wilcox_all = wilcox_res,
+    roc_all = roc_res,
+    roc_filtered = roc_filtered,
+    top_cluster1_markers = top_cluster1,
+    top_cluster2_markers = top_cluster2
+  ))
+}
+```
+
+### Distinguish cluster 4 (ductal) and 12 (liver).
+
+```{r}
+table(integrated$RNA_snn_res.0.5)
+Idents(integrated) <- "RNA_snn_res.0.5"
+
+sc_4_vs_12 <- find_markers(integrated, 4, 12)
+
+sc_4_vs_12$top_cluster1_markers
+sc_4_vs_12$top_cluster2_markers
+```
+
+### Distinguish cluster 3 (sc-EC) and 8 (sc-alpha).
+
+```{r}
+table(integrated$RNA_snn_res.0.5)
+Idents(integrated) <- "RNA_snn_res.0.5"
+
+sc_3_vs_8 <- find_markers(integrated, 3, 8)
+
+sc_3_vs_8$top_cluster1_markers
+sc_3_vs_8$top_cluster2_markers
+```
+
+### Makers of each cluster
+
+```{r}
+
+for(c1 in 0:20){
+  markers <- FindMarkers(integrated, 
+                         ident.1 = c1, 
+                         ident.2 = NULL, 
+                         only.pos = TRUE, 
+                         logfc.threshold = 0.5, 
+                         min.pct = 0.5)
+  print(c1)
+  print(head(markers))
+}
+
+```
+
+## Check marker genes
+
+Mannual examination of the markers listed above plus additional markers from literature. 
+
+ESC -> DE (Definitive endoderm) -> Primitive Gut Tube -> PFG (Posterior Foregut) 
+
+PFG -> Pancreatic progenitors -> beta/alpha/duct cells
+
+
+```{r}
+celltype_markers = list(
+  ESC                 = c("POU5F1", "DPPA4", "NANOG", "ESRG"),
+  DE                  = c("SOX17", "CXCR4", "EOMES", "CYP26A1", "HAS2"),
+  Primitive_Gut_tube  = c("APELA", "SMAD6", "PCAT14", "SEMA3E", "ADAMTS12"),
+  PFG                 = c("ONECUT1", "CDH6", "ZFPM2", "CXXC4"),
+  PP                  = c("SLC4A4", "SPINK1", "DLK1", "PDX1", "SOX9"),
+  Mesenchymal_muscle  = c("ANKRD1", "TAGLN", "ANXA3", "MYL9", "TNFRSF12A"),
+  Endocrine_precursor = c("NEUROG3", "INSM1", "FEV"),
+  SC_beta             = c("ACVR1C", "CALB2", "ISL1", "MAFB", "ABCC8", "INS"),
+  SC_alpha            = c("GCG", "ARX", "ABTB3", "ISL1"),
+  SC_delta            = c("SST", "HHEX"),
+  SC_enterchromaffin  = c("TPH1", "LMX1A", "FEV"),
+  Liver               = c("AFP", "RBP4", "APOA2"),
+  Ductal              = c("THRB", "KLF5", "ABCG2", "GSTA1", "LGALS3"),
+  Stromal             = c("COL1A1", "COL3A1", "TFAP2A", "ANXA1", "SPARC"),
+  Endothelial         = c("PLVAP", "PECAM1", "FLT1", "GNG11", "CDH5")
+)
+
+celltype_markers = lapply(celltype_markers, function(markers) {
+  intersect(markers, rownames(integrated))
+})
+celltype_markers
+
+for (celltype in names(celltype_markers)) {
+  genes <- celltype_markers[[celltype]]
+  
+  # Filter to genes actually present in the data
+  genes <- genes[genes %in% rownames(integrated)]
+  
+  # Further filter out genes expressed in ≤ 0.1% of cells
+  genes <- genes[sapply(genes, function(gene) {
+    expr <- FetchData(integrated, vars = gene)[[1]]
+    mean(expr > 1) > 0.001  # Keep if > 0.1% of cells express it
+  })]
+  
+  n_genes <- length(genes)
+
+  if (n_genes == 0) next
+  
+  cat("\n\n###", celltype, "\n\n")
+  
+  # Dynamically adjust panel layout
+  n_cols <- 3
+  n_rows <- ceiling(n_genes / n_cols)
+  
+  # Generate individual FeaturePlots
+  plots <- lapply(genes, function(gene) {
+    FeaturePlot(integrated, features = gene, reduction = "rpca.umap") + 
+      ggtitle(gene)
+  })
+  
+  # Combine into a patchwork layout and print
+  plot_grid <- wrap_plots(plots, ncol = n_cols)
+  
+  pdf_file <- file.path(output_dir, "cell_type_markers", 
+                        paste0("markers_", celltype, ".pdf"))
+  pdf(pdf_file, width = 4 * n_cols, height = 4 * n_rows)
+  print(plot_grid)
+  dev.off()
+}
+
+```
+
+## Check marker genes for cluster 10
+
+```{r}
+genes = c("SCG2", "GC", "C1QL1", "STMN2", "ONECUT3", "SEZ6L")
+n_cols <- 3
+n_rows <- ceiling(n_genes / n_cols)
+
+plots <- lapply(genes, function(gene) {
+  FeaturePlot(integrated, features = gene, reduction = "rpca.umap") + 
+    ggtitle(gene)
+})
+
+plot_grid <- wrap_plots(plots, ncol = n_cols)
+
+pdf_file <- file.path(output_dir, "cell_type_markers", 
+                      paste0("markers_cluster10.pdf"))
+pdf(pdf_file, width = 4 * n_cols, height = 4 * n_rows)
+print(plot_grid)
+dev.off()
+```
+  
+## Draw a heatmap of marker genes across clusters
+
+```{r}
+all_markers <- unique(unlist(celltype_markers))
+
+# Get cluster IDs
+meta$cluster <- meta$RNA_snn_res.0.5
+Idents(integrated) <- meta$cluster
+
+# Compute average expression
+avg_expr <- AggregateExpression(integrated, features = all_markers, 
+                              group.by = "RNA_snn_res.0.5", 
+                              return.seurat = FALSE)$RNA
+dim(avg_expr)
+avg_expr[1:2,]
+
+summary(colSums(avg_expr))
+
+lib_size <- colSums(avg_expr)
+norm_expr <- sweep(avg_expr, 2, lib_size, FUN = "/") * median(colSums(avg_expr))
+
+log_expr <- log2(norm_expr + 1)
+z_expr <- t(scale(t(log_expr)))
+
+# Compute percent of cells expressing each gene in each cluster
+pct_expr <- sapply(all_markers, function(gene) {
+  tapply(FetchData(integrated, vars = gene)[,1] > 0, meta$cluster, mean)
+}) %>% t()
+
+# Reshape for plotting
+df_expr <- z_expr %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "cluster", values_to = "avg_expr")
+
+dim(df_expr)
+df_expr[1:5,]
+df_expr$cluster = gsub("g", "", df_expr$cluster)
+
+df_pct <- as.data.frame(pct_expr) %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "cluster", values_to = "pct_expr")
+
+dim(df_pct)
+df_pct[1:5,]
+
+df_plot <- left_join(df_expr, df_pct, by = c("gene", "cluster"))
+
+dim(df_plot)
+df_plot[1:5,]
+
+pf_pct_wider = df_pct %>%
+  tidyr::pivot_wider(names_from = cluster, values_from = pct_expr)
+
+gene_order <- pf_pct_wider %>%
+  column_to_rownames("gene") %>%
+  dist() %>%
+  hclust() %>%
+  as.dendrogram() %>%
+  order.dendrogram()
+
+# Reorder gene factor levels
+lvs = pf_pct_wider$gene[gene_order]
+
+df_plot$gene <- factor(df_plot$gene, levels = lvs)
+
+df_expr_wider = df_expr %>%
+  pivot_wider(names_from = cluster, values_from = avg_expr, values_fill = 0) %>% 
+  column_to_rownames("gene")
+
+dim(df_expr_wider)
+df_expr_wider[1:2,]
+
+cluster_order <- df_expr_wider  %>%
+  t() %>%
+  dist() %>%
+  hclust() %>%
+  as.dendrogram() %>%
+  order.dendrogram()
+
+# Apply the new cluster order
+ordered_clusters <- colnames(df_expr_wider)[cluster_order]
+df_plot$cluster <- factor(df_plot$cluster, levels = ordered_clusters)
+
+
+pdf(file.path(output_dir, "figures/cluster_vs_markers_heatmap.pdf"), 
+    width = 6, height = 9)
+ggplot(df_plot, aes(x = cluster, y = gene)) +
+  geom_point(aes(size = pct_expr, color = avg_expr)) + 
+  scale_size(range = c(1, 4), name = "Pct Expr") + 
+  scale_color_gradient2(low = "steelblue", mid = "white", high = "red", 
+                        midpoint = 0,  # Assumes z-scored avg_expr centered at 0
+                        name = "Avg Expr") +
+  theme_minimal() +
+  labs(x = "Cluster", y = "Marker Gene",
+       size = "Pct Expr", color = "Avg Expr") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+
+```
+
+## Function to add subcluster information
+
+```{r}
+update_sub_cluster <- function(sub_obj, cluster_id, possible_cell_types, 
+                               celltype_markers){
+
+  all_markers <- NULL
+  for(ct1 in possible_cell_types){
+    all_markers = c(all_markers, celltype_markers[[ct1]])
+  }
+  
+  ## remove genes that are markers for more than 1 cell type
+  all_markers <- names(table(all_markers)[table(all_markers) == 1])
+  all_markers <- all_markers[all_markers %in% rownames(sub_obj)]
+
+  avg_exp <- AverageExpression(sub_obj, features = all_markers, 
+                               return.seurat = FALSE)$RNA
+  dim(avg_exp)
+  
+  gene_to_celltype = rep(NA, nrow(avg_exp))
+  for(ct1 in possible_cell_types){
+    ww1 = which(rownames(avg_exp) %in% celltype_markers[[ct1]])
+    gene_to_celltype[ww1] = ct1
+  }
+  
+  avg_exp = data.frame(avg_exp)
+  avg_exp$marker_group <- gene_to_celltype
+  
+  avg_long <- avg_exp %>%
+    tibble::rownames_to_column("gene") %>%
+    pivot_longer(-c(gene, marker_group), names_to = "subcluster", values_to = "avg_expr")
+  
+  pdf_file <- file.path(output_dir, 
+                        sprintf("recluster/cluster%s/marker_genes.pdf", cluster_id))
+  pdf(pdf_file, width = 6, height = 4)
+  g1 = ggplot(avg_long, aes(x = marker_group, y = avg_expr, fill = subcluster)) +
+    geom_boxplot() + 
+    theme_minimal()
+  print(g1)
+  dev.off()
+}
+```
+
+## Re-clustering cluster 2
+
+```{r}
+meta$subcluster <- NA
+
+Idents(integrated) <- "RNA_snn_res.0.5"
+
+sub_obj <- subset(integrated, idents = c("2"))
+
+sub_obj <- sub_obj %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(npcs = 30)
+
+sub_obj <- sub_obj %>% 
+  FindNeighbors(dims = 1:20) %>% 
+  FindClusters(resolution = 0.1)
+
+sub_obj <- RunUMAP(sub_obj, dims = 1:20)
+
+dir1 = file.path(output_dir, "recluster/cluster2")
+if (!dir.exists(dir1)) { dir.create(dir1) }
+
+pdf(file.path(output_dir, "recluster/cluster2", "umap_by_clusters.pdf"), 
+    width = 6, height = 5)
+DimPlot(sub_obj, group.by = "seurat_clusters", label = TRUE) + 
+  ggtitle("Subclusters of Cluster 2")
+dev.off()
+
+cluster_id = "2"
+possible_cell_types = c("SC_enterchromaffin", "Endocrine_precursor")
+
+Idents(sub_obj) <- "seurat_clusters"
+table(Idents(sub_obj))
+
+new_labels <- paste(cluster_id, Idents(sub_obj), sep = "_")
+names(new_labels) <- names(Idents(sub_obj)) 
+new_labels[1:5]
+
+mat1 = match(names(new_labels), meta$barcode)
+stopifnot(sum(is.na(mat1)) == 0)
+meta$subcluster[mat1] <- new_labels
+table(meta$subcluster)
+
+update_sub_cluster(sub_obj, cluster_id, possible_cell_types, celltype_markers)
+```
+
+## Re-clustering cluster 16
+
+```{r}
+sub_obj <- subset(integrated, idents = c("16"))
+
+sub_obj <- sub_obj %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(npcs = 30)
+
+sub_obj <- sub_obj %>% 
+  FindNeighbors(dims = 1:20) %>% 
+  FindClusters(resolution = 0.1)
+
+sub_obj <- RunUMAP(sub_obj, dims = 1:20)
+
+dir1 = file.path(output_dir, "recluster/cluster16")
+if (!dir.exists(dir1)) { dir.create(dir1) }
+
+pdf(file.path(output_dir, "recluster/cluster16", "umap_by_clusters.pdf"), 
+    width = 6, height = 5)
+DimPlot(sub_obj, group.by = "seurat_clusters", label = TRUE) + 
+  ggtitle("Subclusters of Cluster 16")
+dev.off()
+
+cluster_id = "16"
+possible_cell_types = c("DE", "Primitive_Gut_tube")
+
+Idents(sub_obj) <- "seurat_clusters"
+table(Idents(sub_obj))
+
+new_labels <- paste(cluster_id, Idents(sub_obj), sep = "_")
+names(new_labels) <- names(Idents(sub_obj)) 
+new_labels[1:5]
+
+mat1 = match(names(new_labels), meta$barcode)
+stopifnot(sum(is.na(mat1)) == 0)
+meta$subcluster[mat1] <- new_labels
+table(meta$subcluster)
+
+update_sub_cluster(sub_obj, cluster_id, possible_cell_types, celltype_markers)
+```
+
+
+## Re-clustering cluster 5
+
+```{r}
+sub_obj <- subset(integrated, idents = c("5"))
+
+sub_obj <- sub_obj %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(npcs = 30)
+
+sub_obj <- sub_obj %>% 
+  FindNeighbors(dims = 1:20) %>% 
+  FindClusters(resolution = 0.1)
+
+sub_obj <- RunUMAP(sub_obj, dims = 1:20)
+
+dir1 = file.path(output_dir, "recluster/cluster5")
+if (!dir.exists(dir1)) { dir.create(dir1) }
+
+pdf(file.path(output_dir, "recluster/cluster5", "umap_by_clusters.pdf"), 
+    width = 6, height = 5)
+DimPlot(sub_obj, group.by = "seurat_clusters", label = TRUE) + 
+  ggtitle("Subclusters of Cluster 5")
+dev.off()
+
+cluster_id = "5"
+possible_cell_types = c("PP", "Ductal", "Liver")
+
+Idents(sub_obj) <- "seurat_clusters"
+table(Idents(sub_obj))
+
+new_labels <- paste(cluster_id, Idents(sub_obj), sep = "_")
+names(new_labels) <- names(Idents(sub_obj)) 
+new_labels[1:5]
+
+mat1 = match(names(new_labels), meta$barcode)
+stopifnot(sum(is.na(mat1)) == 0)
+meta$subcluster[mat1] <- new_labels
+table(meta$subcluster)
+
+update_sub_cluster(sub_obj, cluster_id, possible_cell_types, celltype_markers)
+```
+
+## Re-clustering cluster 10
+
+```{r}
+sub_obj <- subset(integrated, idents = c("10"))
+
+sub_obj <- sub_obj %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(npcs = 30)
+
+sub_obj <- sub_obj %>% 
+  FindNeighbors(dims = 1:20) %>% 
+  FindClusters(resolution = 0.1)
+
+sub_obj <- RunUMAP(sub_obj, dims = 1:20)
+
+dir1 = file.path(output_dir, "recluster/cluster10")
+if (!dir.exists(dir1)) { dir.create(dir1) }
+
+pdf(file.path(output_dir, "recluster/cluster10", "umap_by_clusters.pdf"), 
+    width = 6, height = 5)
+DimPlot(sub_obj, group.by = "seurat_clusters", label = TRUE) + 
+  ggtitle("Subclusters of Cluster 10")
+dev.off()
+
+
+cluster_id = "10"
+possible_cell_types = c("SC_alpha", "Endocrine_precursor", 
+                        "SC_enterchromaffin")
+
+Idents(sub_obj) <- "seurat_clusters"
+table(Idents(sub_obj))
+
+new_labels <- paste(cluster_id, Idents(sub_obj), sep = "_")
+names(new_labels) <- names(Idents(sub_obj)) 
+new_labels[1:5]
+
+mat1 = match(names(new_labels), meta$barcode)
+stopifnot(sum(is.na(mat1)) == 0)
+meta$subcluster[mat1] <- new_labels
+table(meta$subcluster)
+
+update_sub_cluster(sub_obj, cluster_id, possible_cell_types, celltype_markers)
+```
+
+
+## Re-clustering cluster 3
+
+Just to get a reference for the reclustering of cluster 10.
+
+```{r}
+sub_obj <- subset(integrated, idents = c("3"))
+
+sub_obj <- sub_obj %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(npcs = 30)
+
+sub_obj <- sub_obj %>% 
+  FindNeighbors(dims = 1:20) %>% 
+  FindClusters(resolution = 0.2)
+
+sub_obj <- RunUMAP(sub_obj, dims = 1:20)
+
+dir1 = file.path(output_dir, "recluster/cluster3")
+if (!dir.exists(dir1)) { dir.create(dir1) }
+
+pdf(file.path(output_dir, "recluster/cluster3", "umap_by_clusters.pdf"), 
+    width = 6, height = 5)
+DimPlot(sub_obj, group.by = "seurat_clusters", label = TRUE) + 
+  ggtitle("Subclusters of Cluster 3")
+dev.off()
+
+
+cluster_id = "3"
+possible_cell_types = c("Endocrine_precursor", "SC_alpha", "SC_enterchromaffin")
+
+Idents(sub_obj) <- "seurat_clusters"
+table(Idents(sub_obj))
+
+update_sub_cluster(sub_obj, cluster_id, possible_cell_types, celltype_markers)
+```
+
+## Re-clustering cluster 8
+
+Just to get a reference for the reclustering of cluster 10.
+
+```{r}
+sub_obj <- subset(integrated, idents = c("8"))
+
+sub_obj <- sub_obj %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(npcs = 30)
+
+sub_obj <- sub_obj %>% 
+  FindNeighbors(dims = 1:20) %>% 
+  FindClusters(resolution = 0.2)
+
+sub_obj <- RunUMAP(sub_obj, dims = 1:20)
+
+dir1 = file.path(output_dir, "recluster/cluster8")
+if (!dir.exists(dir1)) { dir.create(dir1) }
+
+pdf(file.path(output_dir, "recluster/cluster8", "umap_by_clusters.pdf"), 
+    width = 6, height = 5)
+DimPlot(sub_obj, group.by = "seurat_clusters", label = TRUE) + 
+  ggtitle("Subclusters of Cluster 8")
+dev.off()
+
+
+cluster_id = "8"
+possible_cell_types = c("Endocrine_precursor", "SC_alpha", "SC_enterchromaffin")
+
+Idents(sub_obj) <- "seurat_clusters"
+table(Idents(sub_obj))
+
+update_sub_cluster(sub_obj, cluster_id, possible_cell_types, celltype_markers)
+```
+
+## Re-clustering cluster 11
+
+```{r}
+sub_obj <- subset(integrated, idents = c("11"))
+
+sub_obj <- sub_obj %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(npcs = 30)
+
+sub_obj <- sub_obj %>% 
+  FindNeighbors(dims = 1:20) %>% 
+  FindClusters(resolution = 0.2)
+
+sub_obj <- RunUMAP(sub_obj, dims = 1:20)
+
+dir1 = file.path(output_dir, "recluster/cluster11")
+if (!dir.exists(dir1)) { dir.create(dir1) }
+
+pdf(file.path(output_dir, "recluster/cluster11", "umap_by_clusters.pdf"), 
+    width = 6, height = 5)
+DimPlot(sub_obj, group.by = "seurat_clusters", label = TRUE) + 
+  ggtitle("Subclusters of Cluster 11")
+dev.off()
+
+
+cluster_id = "11"
+possible_cell_types = c("Endocrine_precursor", "SC_alpha", "SC_enterchromaffin")
+
+Idents(sub_obj) <- "seurat_clusters"
+table(Idents(sub_obj))
+
+new_labels <- paste(cluster_id, Idents(sub_obj), sep = "_")
+names(new_labels) <- names(Idents(sub_obj)) 
+new_labels[1:5]
+
+mat1 = match(names(new_labels), meta$barcode)
+stopifnot(sum(is.na(mat1)) == 0)
+meta$subcluster[mat1] <- new_labels
+table(meta$subcluster)
+
+update_sub_cluster(sub_obj, cluster_id, possible_cell_types, celltype_markers)
+```
+
+## Re-clustering cluster 15
+
+```{r}
+Idents(integrated) <- "RNA_snn_res.0.5"
+
+sub_obj <- subset(integrated, idents = c("15"))
+
+sub_obj <- sub_obj %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA(npcs = 30)
+
+sub_obj <- sub_obj %>% 
+  FindNeighbors(dims = 1:20) %>% 
+  FindClusters(resolution = 0.1)
+
+sub_obj <- RunUMAP(sub_obj, dims = 1:20)
+
+dir1 = file.path(output_dir, "recluster/cluster15")
+if (!dir.exists(dir1)) { dir.create(dir1) }
+
+pdf(file.path(output_dir, "recluster/cluster15", "umap_by_clusters.pdf"), 
+    width = 6, height = 5)
+DimPlot(sub_obj, group.by = "seurat_clusters", label = TRUE) + 
+  ggtitle("Subclusters of Cluster 15")
+dev.off()
+
+cluster_id = "15"
+possible_cell_types = c("Ductal", "PP")
+
+Idents(sub_obj) <- "seurat_clusters"
+table(Idents(sub_obj))
+
+new_labels <- paste(cluster_id, Idents(sub_obj), sep = "_")
+names(new_labels) <- names(Idents(sub_obj)) 
+new_labels[1:5]
+
+mat1 = match(names(new_labels), meta$barcode)
+stopifnot(sum(is.na(mat1)) == 0)
+meta$subcluster[mat1] <- new_labels
+table(meta$subcluster)
+
+update_sub_cluster(sub_obj, cluster_id, possible_cell_types, celltype_markers)
+```
+
+### Update meta data
+
+```{r}
+dim(meta)
+meta[1:2,]
+
+table(meta$feature.4 == meta$feature.10, useNA = 'ifany')
+
+
+meta$celltype = NA
+
+meta <- meta %>%
+  mutate(
+    celltype = case_when(
+      RNA_snn_res.0.5 == 0  ~ "ESC",
+      RNA_snn_res.0.5 == 1  ~ "DE",
+      RNA_snn_res.0.5 == 3  ~ "SC-EC",
+      RNA_snn_res.0.5 == 4  ~ "Ductal",
+      RNA_snn_res.0.5 == 6  ~ "SC-beta",
+      RNA_snn_res.0.5 == 7  ~ "PP",
+      RNA_snn_res.0.5 == 8  ~ "SC-alpha",
+      RNA_snn_res.0.5 == 9  ~ "PFG",
+      RNA_snn_res.0.5 == 11 ~ "EnP",
+      RNA_snn_res.0.5 == 12 ~ "Liver",
+      RNA_snn_res.0.5 == 13 ~ "ESC_DE",
+      RNA_snn_res.0.5 == 14 ~ "Stromal",
+      RNA_snn_res.0.5 == 15 ~ "Ductal",
+      RNA_snn_res.0.5 == 17 ~ "SC-delta",
+      RNA_snn_res.0.5 == 18 ~ "DE",
+      RNA_snn_res.0.5 == 19 ~ "Mesenchymal_Stromal",
+      RNA_snn_res.0.5 == 20 ~ "Endothelial",
+      subcluster %in% c("2_0", "2_1", "2_2") ~ "EnP",
+      subcluster == "2_3"                    ~ "DE",
+      subcluster %in% c("5_0", "5_3") ~ "PP",
+      subcluster %in% c("5_2") ~ "Ductal",
+      subcluster %in% c("5_1") ~ "Liver",
+      subcluster %in% c("10_3") ~ "SC_enterchromaffin",
+      subcluster %in% c("16_0", "16_1", "16_2") ~ "PGT",
+      TRUE ~ NA_character_
+    )
+  )
+
+table(meta$RNA_snn_res.0.5, meta$celltype, useNA = "ifany")
+table(meta$subcluster, meta$celltype, useNA = "ifany")
+
+write.csv(meta, 
+          file.path(output_dir, "MSK_KO_village_meta_data.csv"), 
+          row.names = FALSE)
+
+```
+
+# Session information
+```{r}
+gc()
+
+sessionInfo()
+```
+

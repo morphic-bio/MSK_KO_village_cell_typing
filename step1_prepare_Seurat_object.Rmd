@@ -1,0 +1,238 @@
+---
+title: "Prepare Seurat object"
+author: "Zhaoheng Li, Wei Sun"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: journal
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+    number_sections: false
+  df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+
+## R library and data input
+
+```{r load_libraries, warning = FALSE, message = FALSE}
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(tibble)
+library(cowplot)  
+library(patchwork)
+library(stringr)
+library(pheatmap)
+library(reshape2)
+library(readxl)
+
+theme_set(theme_classic())
+
+base_dir = "/fh/working/sun_w/zli/MSK_DEC24"
+data_dir = "/fh/working/sun_w/zli/MSK_DEC24/data2/processed_samples"
+output_dir = "/fh/working/sun_w/wsun/MSK_KO_village_cell_typing/output"
+
+setwd(base_dir)
+```
+
+
+## Read in sample information
+```{r}
+sample_info = read_excel(file.path(base_dir, "sample info.xlsx"), sheet = 1)
+dim(sample_info)
+sample_info[c(1:2, nrow(sample_info)),]
+
+colnames(sample_info) = gsub(" ", "_", colnames(sample_info))
+sample_info$culture_condition = gsub(" ", "-", sample_info$culture_condition)
+
+sample_info$sample_name = sub("_.*$", "", sample_info$sample_name)
+
+sample_info = sample_info %>%
+  fill(culture_condition,sample_name)%>%
+  dplyr::filter(sample_name!='note')
+
+sample_info$culture_condition = gsub("\\r\\n", "_", sample_info$culture_condition)
+table(sample_info$cell_ID,sample_info$culture_condition)
+
+sample_info$cell_ID = as.character(sample_info$cell_ID)
+```
+
+## Read in sample information and gene expression data
+
+```{r}
+df <- data.frame(
+  sample = c(
+    "Sample_A_WT", "Sample_B_WT", "Sample_C_WT", 
+    "Sample_D_WT", "Sample_E_WT", "Sample_F_WT",
+    "Sample_G_1_ESC", "Sample_G_2_ESC", "Sample_H_DE", 
+    "Sample_I_PFG", "Sample_J_PP",
+    "Sample_L_1_3DEC", "Sample_L_2_3DEC"
+  ),
+  include = rep(TRUE, 13)
+)
+
+keys <- c("A", "B", "C", "D", "E", "F", "G_1", "G_2", 
+          "H", "I", "J", "L_1", "L_2")
+
+sample_list <- setNames(as.list(df$sample), keys)
+
+print(sample_list)
+
+sample_dirs = list.dirs(path = data_dir, full.names = TRUE, recursive = FALSE)
+sample_dirs
+
+sample_dirs = sample_dirs[!grepl("cluster", sample_dirs)]
+sample_dirs
+
+stopifnot(setequal(basename(sample_dirs), keys))
+
+seurat_list = lapply(sample_dirs, function(dir) {
+  sample_name = basename(dir)
+  long_name   = sample_list[[sample_name]]
+  print(sample_name)
+  print(long_name)
+  
+  mat = ReadMtx(
+    mtx      = file.path(dir, "matrix.mtx.gz"),
+    features = file.path(dir, "features.tsv.gz"),
+    cells    = file.path(dir, "barcodes.tsv.gz"), 
+    feature.column = 1
+  )
+  
+  # create Seurat object
+  obj = CreateSeuratObject(
+    counts  = mat,
+    project = sample_name
+  )
+  
+  # add cell-level metadata
+  meta_path = file.path(dir, "cell_metadata.tsv")
+  meta_df   = read.delim(meta_path, header = TRUE, sep = "\t", 
+                         row.names = 1, stringsAsFactors = FALSE)
+  dim(meta_df)
+  meta_df[1:2,]
+  
+  stopifnot(ncol(obj) == nrow(meta_df))
+  stopifnot(all(colnames(obj) == rownames(meta_df)))
+
+  obj = AddMetaData(obj, metadata = meta_df)
+  obj$sample_name = sample_name
+  obj$orig.ident = long_name
+  colnames(obj) = paste(long_name, paste0(colnames(obj), "-1"), sep="_")
+  
+  obj
+})
+names(seurat_list) = basename(sample_dirs)
+
+sapply(seurat_list, nrow)
+sapply(seurat_list, ncol)
+
+```
+
+## Update meta data to add sample information
+
+```{r}
+external_samples = c("A","B","C","D","E","F")
+
+for(sample in external_samples){
+  print(sample)
+  obj = seurat_list[[sample]]
+
+  meta = obj[[]]
+  meta$cell_ID = sub("_.*$", "", meta$feature.4)
+
+  # for any re-runs after these columns are added
+  meta = meta[, !names(meta) %in% c("time_point","culture_condition")] 
+  
+  meta = meta%>%
+    left_join(sample_info %>% 
+                select(sample_name, cell_ID, time_point, culture_condition),
+        by = c("sample_name" = "sample_name", "cell_ID" = "cell_ID"))
+  
+  meta$culture_condition = as.factor(meta$culture_condition)
+  rownames(meta) = colnames(obj)
+  
+  obj = AddMetaData(object = obj, metadata = meta)
+  
+  seurat_list[[sample]] = obj
+  print(table(meta$culture_condition, useNA = "ifany"))
+}
+
+for(sample in setdiff(names(seurat_list), external_samples)){
+  obj = seurat_list[[sample]]
+  obj$cell_ID = sub("_.*$", "", obj$feature.4)
+  obj$culture_condition = "KO_village"
+  seurat_list[[sample]] = obj
+}
+
+```
+
+## Additional update of meta data
+
+```{r}
+cell_summary = do.call(
+  rbind,
+  lapply(seurat_list, function(obj) {
+    data.frame(
+      sample   = obj@project.name,  
+      n_cells  = ncol(obj),   
+      row.names = NULL
+    )
+  })
+)
+
+cell_summary
+
+for(sample in names(seurat_list[7:13])){
+  obj = seurat_list[[sample]]
+  obj@meta.data = obj@meta.data %>%
+  mutate(
+    time_point = case_when(
+      sample %in% c("G_1", "G_2") ~ "D-1",
+      sample == "H"              ~ "D3",
+      sample == "I"              ~ "D7",
+      sample == "J"              ~ "D11",
+      sample %in% c("L_1", "L_2") ~ "D18",
+      TRUE                        ~ NA_character_
+    )
+  )
+  seurat_list[[sample]] = obj 
+}
+```
+
+## Sample A has a few unexpected cells.
+
+```{r}
+sample = "A"
+obj = seurat_list[[sample]]
+table(obj@meta.data$culture_condition, useNA = 'ifany')
+keep.cells =!is.na(obj@meta.data$culture_condition)
+cells.to.keep = colnames(obj)[keep.cells]
+obj = subset(obj, cells = cells.to.keep)
+seurat_list[[sample]] = obj
+
+saveRDS(seurat_list,file.path(output_dir, "seurat_list.RDS"))
+```
+
+
+# Session information
+```{r}
+gc()
+
+sessionInfo()
+```
+
+
+

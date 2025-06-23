@@ -1,0 +1,254 @@
+---
+title: "Integrate external WT and KO village"
+author: "Zhaoheng Li, Wei Sun"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: journal
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+    number_sections: false
+  df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R library and data input
+
+```{r load_libraries, warning = FALSE, message = FALSE}
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(tibble)
+library(cowplot)  
+library(patchwork)
+library(stringr)
+library(pheatmap)
+library(reshape2)
+library(readxl)
+
+theme_set(theme_classic())
+
+base_dir = "/fh/working/sun_w/zli/MSK_DEC24"
+data_dir = "/fh/working/sun_w/zli/MSK_DEC24/data2/processed_samples"
+output_dir = "/fh/working/sun_w/wsun/MSK_KO_village_cell_typing/output"
+
+setwd(base_dir)
+```
+
+## Read in Seurat objects
+
+Use samples external wildtype samples B, D, and F (entries 2, 4, and 6 in ```seurat_list```) as reference for integration because in later time points, these 3 samples use 3D culture that are similar to the KO village. 
+
+```{r}
+seurat_list = readRDS(file.path(output_dir,"seurat_list.RDS"))
+names(seurat_list)
+length(seurat_list)
+
+# merge them in this order so that the ref is the first object
+
+ref =  merge(seurat_list[[2]], y = seurat_list[c(4,6)])
+
+merged_all = merge(ref, y = seurat_list[setdiff(1:13,c(2,4,6))])
+
+merged_all $project_id = with(merged_all @meta.data, ifelse(
+  sample_name %in% c("B", "D", "F"),
+  "ref",
+  sample_name
+))
+
+merged_all$project_id = as.factor(merged_all$project_id)
+merged_all[['RNA']] = JoinLayers(merged_all[['RNA']],layer = 'counts')
+merged_all[["RNA"]] = split(merged_all[["RNA"]], f = merged_all$project_id)
+merged_all
+
+merged_all = NormalizeData(merged_all)
+merged_all = FindVariableFeatures(merged_all, nfeatures = 2000)
+merged_all = ScaleData(merged_all)
+
+```
+
+
+## Load gene annoation
+
+```{r load gene annoation}
+gene_anno_file = "gencode_v44_primary_assembly_info.tsv"
+
+assembly_info = read.delim(
+  file      = file.path(base_dir, "gene_annotation/v44", gene_anno_file),
+  header    = TRUE,
+  sep       = "\t",
+  stringsAsFactors = FALSE
+)
+
+dim(assembly_info)
+assembly_info[1:2,]
+
+sum(is.na(assembly_info$hgnc_symbol))
+sum(assembly_info$hgnc_symbol=='', na.rm = T)
+
+assembly_info = assembly_info %>%
+    mutate(hgnc_symbol = if_else(is.na(hgnc_symbol) | hgnc_symbol == "", 
+                               ensembl_gene_id, 
+                               hgnc_symbol))
+sum(is.na(assembly_info$hgnc_symbol))
+sum(assembly_info$hgnc_symbol=='', na.rm= T)
+sum(assembly_info$hgnc_symbol == assembly_info$ensembl_gene_id)
+```
+
+## match ensembl ID to gene symbols
+
+```{r}
+symbol_map = setNames(
+  assembly_info$hgnc_symbol,
+  assembly_info$ensembl_gene_id
+)
+
+feat_meta = merged_all@assays$RNA@meta.data
+rownames(feat_meta) = rownames(merged_all)
+
+dim(feat_meta)
+names(feat_meta)
+feat_meta[1:2,1:4]
+
+feat_meta$hgnc_symbol = symbol_map[rownames(feat_meta)]
+merged_all@assays$RNA@meta.data = feat_meta
+merged_all@assays$RNA@meta.data$ensembl_id = rownames(merged_all@assays$RNA@meta.data)
+sum(is.na(feat_meta$hgnc_symbol)) 
+
+# Get the hgnc_symbol vector
+ids = as.character(merged_all@assays$RNA@meta.data$hgnc_symbol)
+
+# Find duplicated entries (both forward and backward)
+duplicated_ids = ids[duplicated(ids) | duplicated(ids, fromLast = TRUE)]
+duplicated_ids_unique = unique(duplicated_ids)
+duplicated_ids_unique
+
+# set row names
+rownames(merged_all[["RNA"]]) = make.unique(merged_all@assays$RNA@meta.data$hgnc_symbol)
+duplicated_ids_unique %in% VariableFeatures(merged_all)
+```
+
+## PCA analysi
+
+Here are the interpretation of PCs based on top positive/negative genes by ChatGPT. 
+
+
+| **PC** | **Biological Axis**                      | **Positive Pole**             | **Negative Pole**                |
+|--------|------------------------------------------|-------------------------------|----------------------------------|
+| PC1    | Endocrine vs Pluripotent                 | INS, CHGA, SCGN               | POU5F1, LIN28A                   |
+| PC2    | Mesenchymal/Epithelial vs Pluripotent    | FN1, CDH6                     | CRIPTO, DNMT3B                   |
+| PC3    | Definitive Endoderm vs Pluripotent       | SOX17, CER1                   | MYC, MT1 genes                   |
+| PC4    | Neuronal vs Hepatic                      | DLK1, AUTS2                   | APOE, AFP                        |
+| PC5    | Neuronal Signaling vs Gut/Endocrine      | PLXDC2, GRIA4                 | NEUROG3, GHRL                    |
+
+```{r}
+merged_all = RunPCA(merged_all)
+merged_all = RunUMAP(merged_all , dims = 1:30)
+
+merged_all@assays$RNA
+
+merged_all$time_point = as.factor(merged_all$time_point)
+summary(merged_all$time_point)
+
+new_levels = c(
+  "D-1",  "D3",  "D5",  "D7",  "D9",  "D10", "D11",
+  "D12", "D13", "D14", "D15", "D16", "D18", "D21",
+  "D25", "D26", "D35"
+)
+merged_all$time_point = factor(merged_all$time_point,
+                                levels = new_levels)
+
+```
+
+
+## merge culture_condition categories
+
+```{r}
+cc = as.character(merged_all@meta.data$culture_condition)
+cc = str_trim(cc)                   # drop stray whitespace
+cc = str_replace_all(cc, "–", "-")  # normalize any en–dash/chars
+
+cc2 = as.factor(ifelse(
+  is.na(cc), 
+  "unannotated",
+  ifelse(
+    str_detect(cc, regex("\\b3D\\b", ignore_case = TRUE)), "3D",
+    ifelse(
+      str_detect(cc, regex("\\b2D\\b", ignore_case = TRUE)), "2D",
+      cc
+    )
+  )
+))
+
+merged_all = AddMetaData(
+  object    = merged_all,
+  metadata  = cc2,
+  col.name  = "culture_condition2"
+)
+
+merged_all$source = ifelse(
+  merged_all$sample_name %in% c("A","B","C","D","E","F"),
+  "external_WT",
+  "KO_village"
+)
+```
+
+## Integration
+
+```{r}
+lv_all = levels(merged_all$project_id)
+merged_all$project_id <- factor(merged_all$project_id, 
+                                levels = c("ref",  setdiff(lv_all, "ref")))
+levels(merged_all$project_id)
+merged_all
+
+integrated = IntegrateLayers(object = merged_all, method = RPCAIntegration, 
+                             orig.reduction = "pca", 
+                             new.reduction = "integrated.rpca", 
+                             verbose = TRUE, reference = c(1))
+
+# flattens the data structure for standard Seurat operations
+integrated[["RNA"]] = JoinLayers(integrated[["RNA"]])
+```
+
+
+## UMAP
+
+```{r}
+integrated  = RunUMAP(integrated , dims = 1:30, 
+                      reduction = "integrated.rpca",  
+                      reduction.name = "rpca-umap", 
+                      reduction.key  = "RPCAUMAP_")
+# Cluster
+integrated = FindNeighbors(
+  integrated,
+  reduction  = "integrated.rpca",
+  dims       = 1:30,
+)
+set.seed(2025)
+integrated = FindClusters(integrated, resolution = 1)
+integrated = FindClusters(integrated, resolution = 0.8)
+integrated = FindClusters(integrated, resolution = 0.5)
+integrated = FindClusters(integrated, resolution = 0.3)
+
+saveRDS(integrated, file.path(output_dir,"integrated-rpca_BDF-ref.RDS"))
+
+```
+
+# Session information
+```{r}
+gc()
+
+sessionInfo()
+```
+

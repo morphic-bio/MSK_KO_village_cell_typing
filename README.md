@@ -1,2 +1,5 @@
-# MSK_KO_village_cell_typing
-annotate cell types for MSK KO village data
+# MSK KO village cell typing
+
+Annotate cell types for MSK KO village scRNAseq data.
+
+

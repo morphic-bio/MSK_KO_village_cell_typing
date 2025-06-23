@@ -1,0 +1,271 @@
+---
+title: "Summarize clusters"
+author: "Zhaoheng Li, Wei Sun"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: journal
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+    number_sections: false
+  df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R library and data input
+
+```{r load_libraries, warning = FALSE, message = FALSE}
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(tibble)
+library(cowplot)  
+library(patchwork)
+library(stringr)
+library(pheatmap)
+library(reshape2)
+library(readxl)
+library(grid)
+
+theme_set(theme_classic())
+
+base_dir = "/fh/working/sun_w/zli/MSK_DEC24"
+data_dir = "/fh/working/sun_w/zli/MSK_DEC24/data2/processed_samples"
+output_dir = "/fh/working/sun_w/wsun/MSK_KO_village_cell_typing/output"
+
+setwd(base_dir)
+```
+
+## Read in Seurat objects
+
+```{r}
+integrated = readRDS(file.path(output_dir,"integrated-rpca_BDF-ref.RDS"))
+
+dim(integrated)
+colnames(integrated)[1:2]
+```
+
+## Plot by time points and samples
+
+```{r warning=FALSE, message = FALSE}
+embed_vec = c("integrated.rpca", "rpca.umap")
+
+f = integrated$RNA_snn_res.0.5
+f = factor(f, levels = sort(as.numeric(levels(f))))
+integrated$RNA_snn_res.0.5 = f
+integrated$RNA_snn_res.0.5[1:10]
+
+for(embed in embed_vec){
+  name = embed
+  if(embed == 'integrated.rpca'){
+    name = 'integrated-rpca'
+  }
+  if(embed == 'rpca.umap'){
+    name = 'integrated-rpca_umap'
+  }
+  
+  pdf(file = file.path(output_dir, "figures", paste0(name, ".pdf")), 
+      width = 8, height = 6)
+
+  print(DimPlot(integrated, reduction = embed, group.by = "sample_name"))
+  print(DimPlot(integrated, reduction = embed, group.by = "culture_condition"))
+  print(DimPlot(integrated, reduction = embed, group.by = "time_point"))
+  print(DimPlot(integrated, reduction = embed, group.by = "source"))
+  print(DimPlot(integrated, reduction = embed, group.by = "RNA_snn_res.0.5"))
+
+  dev.off()
+  
+  time_pts = sort(unique(integrated$time_point))
+  
+  plots = lapply(time_pts, function(tp) {
+    cells.tp = WhichCells(integrated, expression = time_point == tp)
+    
+    DimPlot(integrated, reduction = embed, 
+            cells.highlight = cells.tp, pt.size = 0.5) + 
+      ggtitle(tp) + theme(plot.title = element_text(hjust = 0.5), 
+                          legend.position = "none")
+  })
+  
+  pdf(file = file.path(output_dir, "figures", paste0(name,  "_time_points.pdf")), 
+      width = 10, height = 12)
+  print(plot_grid(plotlist = plots, ncol = 4))
+  dev.off()
+  
+  ss = sort(unique(integrated$sample_name))
+  
+  plots = lapply(ss, function(samp) {
+    cells.tp = WhichCells(integrated, expression = sample_name == samp)
+    
+    DimPlot(integrated, reduction = embed, cells.highlight = cells.tp, 
+            pt.size = 0.5) + ggtitle(samp) + 
+      theme(plot.title = element_text(hjust = 0.5), legend.position = "none")
+  })
+  
+  pdf(file = file.path(output_dir, "figures", paste0(name, "_samples.pdf")), 
+      width = 10, height = 10)
+  print(plot_grid(plotlist = plots, ncol = 4))
+  dev.off()
+  
+  ss = sort(unique(integrated$RNA_snn_res.0.5))
+  
+  plots = lapply(ss, function(samp) {
+    cells.tp = WhichCells(integrated, expression = RNA_snn_res.0.5 == samp)
+    
+    DimPlot(integrated, reduction = embed, cells.highlight = cells.tp, 
+            pt.size = 0.5) + ggtitle(samp) + 
+      theme(plot.title = element_text(hjust = 0.5), legend.position = "none")
+  })
+  
+  pdf(file = file.path(output_dir, "figures", paste0(name, "_clusters.pdf")), 
+      width = 12.5, height = 12.5)
+  print(plot_grid(plotlist = plots, ncol = 5))
+  dev.off()
+}
+
+```
+
+
+## Summarize cluster composition
+
+```{r}
+meta = integrated[[]]
+res_cols = grep("^RNA_snn_res\\.", colnames(meta), value = TRUE)
+res_cols
+
+cluster_summary_list = list()
+
+for (res in res_cols) {
+  prop_list = list()
+  message("Processing ", res)
+  
+  df = meta %>%
+    select(all_of(res), sample_name, time_point) %>%
+    mutate(cluster = as.character(.data[[res]]))  # ensure cluster is treated as character
+
+  # Count by sample_name
+  sample_counts = df %>%
+    group_by(cluster, sample_name) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    group_by(cluster) %>%
+    mutate(prop = n / sum(n), category = "sample_name")%>%
+    mutate(resolution = res)
+  prop_list[['sample']] = sample_counts
+
+  # Count by time_point
+  time_counts = df %>%
+    group_by(cluster, time_point) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    group_by(cluster) %>%
+    mutate(prop = n / sum(n), category = "time_point")%>%
+    mutate(resolution = res)
+  prop_list[['time_point']] = time_counts
+
+  cluster_summary_list[[res]] = prop_list
+}
+
+```
+
+## Save cluster summary results
+
+```{r}
+cluster_summary_dir = file.path(output_dir, "_cluster_summary")
+
+pdf(file.path(cluster_summary_dir, "cluster_summary_heatmap.pdf"), 
+    width=6, height=4)
+
+for (res in names(cluster_summary_list)) {
+  message("Processing and saving wide-format CSVs for ", res)
+  
+  # Create subdirectory for this resolution
+  res_dir = file.path(cluster_summary_dir, res)
+  if (!dir.exists(res_dir)) {
+    dir.create(res_dir)
+  }
+
+  prop_list = cluster_summary_list[[res]]
+  
+  for (cat in names(prop_list)) {
+    df_cat = prop_list[[cat]] 
+
+    df_cat$cluster = factor(df_cat$cluster, 
+                      levels = sort(unique(as.numeric(df_cat$cluster))))
+
+    # Rename category column to 'value'
+    if (cat == "sample") {
+      df_cat = df_cat %>% 
+        rename(value = sample_name) %>%
+        mutate(value = factor(value, levels = c("A", "B", "C", "D", "E", "F",
+                                                "G_1", "G_2", "H", "I", "J", 
+                                                "L_1", "L_2")))
+    } else if (cat == "time_point") {
+      df_cat = df_cat %>% 
+        rename(value = time_point) %>%
+        mutate(value = factor(value, levels = c(
+          "D-1", "D3", "D5", "D7", "D9", "D10", "D11", "D12", "D13", "D14",
+          "D15", "D16", "D18", "D21", "D25", "D26", "D35"
+        )))
+    } 
+    
+    # Create matrix: rows = group, columns = cluster, values = proportion
+    mat = df_cat %>%
+      select(cluster, value, prop) %>%
+      pivot_wider(names_from = cluster, values_from = prop, values_fill = 0) %>%
+      column_to_rownames("value") %>%
+      as.matrix()
+    
+    mat = mat[levels(df_cat$value), levels(df_cat$cluster), drop = FALSE]
+    
+    # Save wide-format matrix as CSV inside the resolution subdir
+    out_file = file.path(res_dir, paste0(cat, ".csv"))
+    write.csv(mat, out_file)
+    message("Saved wide CSV: ", out_file)
+    
+    
+    # Drop NAs and ensure levels are respected
+    df_cat = df_cat %>% drop_na(prop)
+    
+    # Only plot if there's data
+    if (nrow(df_cat) > 0) {
+      gg = ggplot(df_cat, aes(x = cluster, y = value, fill = prop)) +
+        geom_tile(color = "grey80") +
+        scale_fill_gradient(low = "white", high = "steelblue4") +
+        labs(
+          title = paste(cat, "(", res, ")"),
+          x = "Cluster",
+          y = cat,
+          fill = "Proportion"
+        ) +
+        theme_classic(base_size = 10) +
+        theme(
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title = element_text(size = 12, face = "bold")
+        )
+      
+      print(gg)
+    } else {
+      message("Skipping empty plot for ", cat, " (", res, ")")
+    }
+  }
+}
+
+dev.off()
+
+```
+
+# Session information
+```{r}
+gc()
+
+sessionInfo()
+```
+
