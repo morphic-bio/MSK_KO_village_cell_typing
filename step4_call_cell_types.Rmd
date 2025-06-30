@@ -249,7 +249,7 @@ for (celltype in names(celltype_markers)) {
   
   # Generate individual FeaturePlots
   plots <- lapply(genes, function(gene) {
-    FeaturePlot(integrated, features = gene, raster=FALSE, reduction = "rpca.umap") + 
+    FeaturePlot(integrated, features = gene, reduction = "rpca.umap") + 
       ggtitle(gene)
   })
   
