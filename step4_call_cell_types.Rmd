@@ -234,7 +234,7 @@ for (celltype in names(celltype_markers)) {
   # Further filter out genes expressed in ≤ 0.1% of cells
   genes <- genes[sapply(genes, function(gene) {
     expr <- FetchData(integrated, vars = gene)[[1]]
-    mean(expr > 1) > 0.001  # Keep if > 0.1% of cells express it
+    mean(expr > 1) > 0.001
   })]
   
   n_genes <- length(genes)
@@ -249,7 +249,7 @@ for (celltype in names(celltype_markers)) {
   
   # Generate individual FeaturePlots
   plots <- lapply(genes, function(gene) {
-    FeaturePlot(integrated, features = gene, reduction = "rpca.umap") + 
+    FeaturePlot(integrated, features = gene, raster=FALSE, reduction = "rpca.umap") + 
       ggtitle(gene)
   })
   
@@ -817,7 +817,7 @@ meta <- meta %>%
       subcluster %in% c("5_0", "5_3") ~ "PP",
       subcluster %in% c("5_2") ~ "Ductal",
       subcluster %in% c("5_1") ~ "Liver",
-      subcluster %in% c("10_3") ~ "SC_enterchromaffin",
+      subcluster %in% c("10_3") ~ "SC-EC",
       subcluster %in% c("16_0", "16_1", "16_2") ~ "PGT",
       TRUE ~ NA_character_
     )
